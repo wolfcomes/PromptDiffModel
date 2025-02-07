@@ -1,0 +1,4 @@
+data/
+processed_crossdock_noH_full_temp/train_smiles.npy
+script/add_subfolders.log
+processed_crossdock_noH_full_temp/train.npz
