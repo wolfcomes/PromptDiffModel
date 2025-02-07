@@ -304,7 +304,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
                                            pocket['mask'], gamma_0)
 
             net_out_0_lig, _ = self.dynamics(
-                z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'])
+                z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'], prompt_labels)
 
             log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
                 self.log_pxh_given_z0_without_constants(

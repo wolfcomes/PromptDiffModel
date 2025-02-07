@@ -19,6 +19,12 @@ import torch.nn.functional as F
 
 datadir = '../data/docking_results/processed_crossdock_noH_full_temp'
 
+def get_prompts(data):
+    # 创建一个张量 [0, 0, 1]
+    prompts = torch.tensor(data['prompt_labels']).to('cuda', INT_TYPE)
+    
+    return prompts
+
 def get_ligand_and_pocket(data,virtual_nodes):
     ligand = {
         'x': data['lig_coords'].to('cuda', FLOAT_TYPE),
@@ -173,8 +179,6 @@ test_loader = DataLoader(test_dataset, batch_size=8, num_workers=24, collate_fn=
 
 x_dims = 3
 joint_nf =4
-condition_vector = torch.tensor([0, 0, 1], dtype=torch.int, device='cuda')
-
 
 
 net_dynamics = EGNNDynamics(
@@ -199,7 +203,7 @@ net_dynamics = EGNNDynamics(
     update_pocket_coords= False,
     reflection_equivariant=True,
     edge_embedding_dim=8,
-    condition_vector = condition_vector
+    condition_vector = True
 )
 
 
@@ -251,11 +255,12 @@ for epoch in range(num_epochs):
 
         # 提取配体和口袋数据
         ligand, pocket = get_ligand_and_pocket(batch, virtual_nodes)
+        prompt_labels = get_prompts(batch)
         
         # 计算损失，返回 (nll, info)
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
         loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
-        kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, return_info=True)
+        kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, prompt_labels, return_info=True)
 
         if loss_type == 'l2':
             actual_ligand_size = ligand['size'] - ligand['num_virtual_atoms'] if virtual_nodes else ligand['size']
@@ -298,9 +303,10 @@ for epoch in range(num_epochs):
             # batch = {key: batch[key].to(device) for key in batch}
             
             ligand, pocket = get_ligand_and_pocket(batch, virtual_nodes)
+            prompt_labels = get_prompts(batch)
             delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
             loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
-            kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, return_info=True)
+            kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, prompt_labels, return_info=True)
 
             if loss_type == 'l2':
                 actual_ligand_size = ligand['size'] - ligand['num_virtual_atoms'] if virtual_nodes else ligand['size']
@@ -335,9 +341,10 @@ with torch.no_grad():  # 不需要计算梯度
         # batch = {key: batch[key].to(device) for key in batch}
 
         ligand, pocket = get_ligand_and_pocket(batch, virtual_nodes)
+        prompt_labels = get_prompts(batch)
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
         loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
-        kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, return_info=True)
+        kl_prior, log_pN, t_int, xh_lig_hat, info = cddpm(ligand, pocket, prompt_labels, return_info=True)
 
         if loss_type == 'l2':
             actual_ligand_size = ligand['size'] - ligand['num_virtual_atoms'] if virtual_nodes else ligand['size']
