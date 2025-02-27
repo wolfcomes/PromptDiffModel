@@ -110,14 +110,14 @@ class ConditionalDDPM(EnVariationalDiffusion):
         return log_p_x_given_z0_without_constants_ligand, log_ph_given_z0_ligand
 
     def sample_p_xh_given_z0(self, z0_lig, xh0_pocket, lig_mask, pocket_mask,
-                             batch_size, fix_noise=False):
+                             batch_size, prompt_labels, fix_noise=False):
         """Samples x ~ p(x|z0)."""
         t_zeros = torch.zeros(size=(batch_size, 1), device=z0_lig.device)
         gamma_0 = self.gamma(t_zeros)
         # Computes sqrt(sigma_0^2 / alpha_0^2)
         sigma_x = self.SNR(-0.5 * gamma_0)
         net_out_lig, _ = self.dynamics(
-            z0_lig, xh0_pocket, t_zeros, lig_mask, pocket_mask)
+            z0_lig, xh0_pocket, t_zeros, lig_mask, pocket_mask, prompt_labels)
 
         # Compute mu for p(zs | zt).
         mu_x_lig = self.compute_x_pred(net_out_lig, z0_lig, gamma_0, lig_mask)
@@ -199,26 +199,26 @@ class ConditionalDDPM(EnVariationalDiffusion):
         return -self.subspace_dimensionality(num_nodes) * \
                np.log(self.norm_values[0])
 
-    def forward(self, ligand, pocket, prompt_labels, return_info=False):
+    def forward(self, ref_ligand, pocket, opt_ligand, prompt_labels, return_info=False):
         """
         Computes the loss and NLL terms
         """
         # Normalize data, take into account volume change in x.
-        ligand, pocket = self.normalize(ligand, pocket)
+        opt_ligand, pocket = self.normalize(opt_ligand, pocket)
 
         # Likelihood change due to normalization
         # if self.vnode_idx is not None:
         #     delta_log_px = self.delta_log_px(ligand['size'] - ligand['num_virtual_atoms'] + pocket['size'])
         # else:
-        delta_log_px = self.delta_log_px(ligand['size'])
+        delta_log_px = self.delta_log_px(opt_ligand['size'])
 
         # Sample a timestep t for each example in batch
         # At evaluation time, loss_0 will be computed separately to decrease
         # variance in the estimator (costs two forward passes)
         lowest_t = 0 if self.training else 1
         t_int = torch.randint(
-            lowest_t, self.T + 1, size=(ligand['size'].size(0), 1),
-            device=ligand['x'].device).float()
+            lowest_t, self.T + 1, size=(opt_ligand['size'].size(0), 1),
+            device=opt_ligand['x'].device).float()
         s_int = t_int - 1  # previous timestep
 
         # Masks: important to compute log p(x | z0).
@@ -231,40 +231,44 @@ class ConditionalDDPM(EnVariationalDiffusion):
         t = t_int / self.T
 
         # Compute gamma_s and gamma_t via the network.
-        gamma_s = self.inflate_batch_array(self.gamma(s), ligand['x'])
-        gamma_t = self.inflate_batch_array(self.gamma(t), ligand['x'])
+        gamma_s = self.inflate_batch_array(self.gamma(s), opt_ligand['x'])
+        gamma_t = self.inflate_batch_array(self.gamma(t), opt_ligand['x'])
 
         # Concatenate x, and h[categorical].
-        xh0_lig = torch.cat([ligand['x'], ligand['one_hot']], dim=1)
-        xh0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
+        xhc0_lig = torch.cat([opt_ligand['x'], opt_ligand['one_hot']], dim=1)
+        xhc0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
+
+        xh0_lig = xhc0_lig[:, :self.n_dims+self.atom_nf]
+        xh0_pocket = xhc0_pocket[:, :self.n_dims+self.residue_nf]
 
         # Center the input nodes
         xh0_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims] = \
             self.remove_mean_batch(xh0_lig[:, :self.n_dims],
                                    xh0_pocket[:, :self.n_dims],
-                                   ligand['mask'], pocket['mask'])
-
+                                   opt_ligand['mask'], pocket['mask'])
+        
         # Find noised representation
         z_t_lig, xh_pocket, eps_t_lig = \
-            self.noised_representation(xh0_lig, xh0_pocket, ligand['mask'],
+            self.noised_representation(xh0_lig, xh0_pocket, opt_ligand['mask'],
                                        pocket['mask'], gamma_t)
+        
 
         # Neural net prediction.
         net_out_lig, _ = self.dynamics(
-            z_t_lig, xh_pocket, t, ligand['mask'], pocket['mask'], prompt_labels)
+            z_t_lig, xhc0_pocket, t, opt_ligand['mask'], pocket['mask'], prompt_labels)
 
         # For LJ loss term
         # xh_lig_hat does not need to be zero-centered as it is only used for
         # computing relative distances
         xh_lig_hat = self.xh_given_zt_and_epsilon(z_t_lig, net_out_lig, gamma_t,
-                                                  ligand['mask'])
+                                                  opt_ligand['mask'])
 
         # Compute the L2 error.
         squared_error = (eps_t_lig - net_out_lig) ** 2
         if self.vnode_idx is not None:
             # coordinates of virtual atoms should not contribute to the error
-            squared_error[ligand['one_hot'][:, self.vnode_idx].bool(), :self.n_dims] = 0
-        error_t_lig = self.sum_except_batch(squared_error, ligand['mask'])
+            squared_error[opt_ligand['one_hot'][:, self.vnode_idx].bool(), :self.n_dims] = 0
+        error_t_lig = self.sum_except_batch(squared_error, opt_ligand['mask'])
 
         # Compute weighting with SNR: (1 - SNR(s-t)) for epsilon parametrization
         SNR_weight = (1 - self.SNR(gamma_s - gamma_t)).squeeze(1)
@@ -273,18 +277,18 @@ class ConditionalDDPM(EnVariationalDiffusion):
         # The _constants_ depending on sigma_0 from the
         # cross entropy term E_q(z0 | x) [log p(x | z0)].
         neg_log_constants = -self.log_constants_p_x_given_z0(
-            n_nodes=ligand['size'], device=error_t_lig.device)
+            n_nodes=opt_ligand['size'], device=error_t_lig.device)
 
         # The KL between q(zT | x) and p(zT) = Normal(0, 1).
         # Should be close to zero.
-        kl_prior = self.kl_prior(xh0_lig, ligand['mask'], ligand['size'])
+        kl_prior = self.kl_prior(xh0_lig, opt_ligand['mask'], opt_ligand['size'])
 
         if self.training:
             # Computes the L_0 term (even if gamma_t is not actually gamma_0)
             # and this will later be selected via masking.
             log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
                 self.log_pxh_given_z0_without_constants(
-                    ligand, z_t_lig, eps_t_lig, net_out_lig, gamma_t)
+                    opt_ligand, z_t_lig, eps_t_lig, net_out_lig, gamma_t)
 
             loss_0_x_ligand = -log_p_x_given_z0_without_constants_ligand * \
                               t_is_zero.squeeze()
@@ -296,36 +300,40 @@ class ConditionalDDPM(EnVariationalDiffusion):
         else:
             # Compute noise values for t = 0.
             t_zeros = torch.zeros_like(s)
-            gamma_0 = self.inflate_batch_array(self.gamma(t_zeros), ligand['x'])
+            gamma_0 = self.inflate_batch_array(self.gamma(t_zeros), opt_ligand['x'])
 
             # Sample z_0 given x, h for timestep t, from q(z_t | x, h)
             z_0_lig, xh_pocket, eps_0_lig = \
-                self.noised_representation(xh0_lig, xh0_pocket, ligand['mask'],
+                self.noised_representation(xh0_lig, xh0_pocket, opt_ligand['mask'],
                                            pocket['mask'], gamma_0)
 
             net_out_0_lig, _ = self.dynamics(
-                z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'], prompt_labels)
+                z_0_lig, xhc0_pocket, t_zeros, opt_ligand['mask'], pocket['mask'], prompt_labels)
 
             log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
                 self.log_pxh_given_z0_without_constants(
-                    ligand, z_0_lig, eps_0_lig, net_out_0_lig, gamma_0)
+                    opt_ligand, z_0_lig, eps_0_lig, net_out_0_lig, gamma_0)
             loss_0_x_ligand = -log_p_x_given_z0_without_constants_ligand
             loss_0_h = -log_ph_given_z0
 
         # sample size prior
-        log_pN = self.log_pN(ligand['size'], pocket['size'])
+        # log_pN = self.log_pN(opt_ligand['size'], pocket['size'])
 
         info = {
             'eps_hat_lig_x': scatter_mean(
-                net_out_lig[:, :self.n_dims].abs().mean(1), ligand['mask'],
+                net_out_lig[:, :self.n_dims].abs().mean(1), opt_ligand['mask'],
                 dim=0).mean(),
             'eps_hat_lig_h': scatter_mean(
-                net_out_lig[:, self.n_dims:].abs().mean(1), ligand['mask'],
+                net_out_lig[:, self.n_dims:].abs().mean(1), opt_ligand['mask'],
                 dim=0).mean(),
         }
+        # loss_terms = (delta_log_px, error_t_lig, torch.tensor(0.0), SNR_weight,
+        #               loss_0_x_ligand, torch.tensor(0.0), loss_0_h,
+        #               neg_log_constants, kl_prior, log_pN,
+        #               t_int.squeeze(), xh_lig_hat)
         loss_terms = (delta_log_px, error_t_lig, torch.tensor(0.0), SNR_weight,
                       loss_0_x_ligand, torch.tensor(0.0), loss_0_h,
-                      neg_log_constants, kl_prior, log_pN,
+                      neg_log_constants, kl_prior,
                       t_int.squeeze(), xh_lig_hat)
         return (*loss_terms, info) if return_info else loss_terms
     
@@ -361,7 +369,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
             
         return z_t_lig, xh_pocket, eps_t_lig
 
-    def diversify(self, ligand, pocket, noising_steps):
+    def diversify(self, ligand, pocket, noising_steps, prompt_labels):
         """
         Diversifies a set of ligands via noise-denoising
         """
@@ -393,11 +401,11 @@ class ConditionalDDPM(EnVariationalDiffusion):
             t_array = t_array / timesteps
 
             z_lig, xh_pocket = self.sample_p_zs_given_zt(
-                s_array, t_array, z_lig.detach(), xh_pocket.detach(), lig_mask, pocket['mask'])
+                s_array, t_array, z_lig.detach(), xh_pocket.detach(), lig_mask, prompt_labels, pocket['mask'])
 
         # Finally sample p(x, h | z_0).
         x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
-            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples)
+            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples, prompt_labels)
 
         self.assert_mean_zero_with_mask(x_lig, lig_mask)
 
@@ -430,7 +438,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
         return zt_lig, xh0_pocket
 
     def sample_p_zs_given_zt(self, s, t, zt_lig, xh0_pocket, ligand_mask,
-                             pocket_mask, fix_noise=False):
+                             pocket_mask, prompt_labels, fix_noise=False):
         """Samples from zs ~ p(zs | zt). Only used during sampling."""
         gamma_s = self.gamma(s)
         gamma_t = self.gamma(t)
@@ -443,7 +451,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
 
         # Neural net prediction.
         eps_t_lig, _ = self.dynamics(
-            zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
+            zt_lig, xh0_pocket, t, ligand_mask, pocket_mask, prompt_labels)
 
         # Compute mu for p(zs | zt).
         # Note: mu_{t->s} = 1 / alpha_{t|s} z_t - sigma_{t|s}^2 / sigma_t / alpha_{t|s} epsilon
@@ -476,7 +484,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
                                   "without given pocket.")
 
     @torch.no_grad()
-    def sample_given_pocket(self, pocket, num_nodes_lig, return_frames=1,
+    def sample_given_pocket(self, pocket, prompt_labels, num_nodes_lig, return_frames=1,
                             timesteps=None):
         """
         Draw samples from the generative model. Optionally, return intermediate
@@ -523,7 +531,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
             t_array = t_array / timesteps
 
             z_lig, xh_pocket = self.sample_p_zs_given_zt(
-                s_array, t_array, z_lig, xh_pocket, lig_mask, pocket['mask'])
+                s_array, t_array, z_lig, xh_pocket, lig_mask, pocket['mask'], prompt_labels)
 
             # save frame
             if (s * return_frames) % timesteps == 0:
@@ -533,7 +541,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
 
         # Finally sample p(x, h | z_0).
         x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
-            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples)
+            z_lig, xh_pocket, lig_mask, pocket['mask'], n_samples, prompt_labels)
 
         self.assert_mean_zero_with_mask(x_lig, lig_mask)
 
@@ -555,7 +563,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
                pocket['mask']
 
     @torch.no_grad()
-    def inpaint(self, ligand, pocket, lig_fixed, resamplings=1, return_frames=1,
+    def inpaint(self, ligand, pocket, prompt_labels, lig_fixed, resamplings=1, return_frames=1,
                 timesteps=None, center='ligand'):
         """
         Draw samples from the generative model while fixing parts of the input.
@@ -631,7 +639,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
                 # sample inpainted part
                 z_lig_unknown, xh_pocket = self.sample_p_zs_given_zt(
                     s_array, t_array, z_lig, xh_pocket, ligand['mask'],
-                    pocket['mask'])
+                    pocket['mask'], prompt_labels)
 
                 # sample known nodes from the input
                 com_pocket = scatter_mean(xh_pocket[:, :self.n_dims],
@@ -675,7 +683,7 @@ class ConditionalDDPM(EnVariationalDiffusion):
 
         # Finally sample p(x, h | z_0).
         x_lig, h_lig, x_pocket, h_pocket = self.sample_p_xh_given_z0(
-            z_lig, xh_pocket, ligand['mask'], pocket['mask'], n_samples)
+            z_lig, xh_pocket, ligand['mask'], pocket['mask'], n_samples, prompt_labels)
 
         # Overwrite last frame with the resulting x and h.
         out_lig[0] = torch.cat([x_lig, h_lig], dim=1)

@@ -188,9 +188,9 @@ test_dataset = ProcessedLigandPocketDataset(Path(datadir, 'test.npz'), transform
 val_dataset = ProcessedLigandPocketDataset(Path(datadir, 'val.npz'), transform=data_transform)
 
 
-train_loader = DataLoader(train_dataset, batch_size=8, num_workers=24, collate_fn=train_dataset.collate_fn, shuffle=False, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=8, num_workers=24, collate_fn=val_dataset.collate_fn, shuffle=False,pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=8, num_workers=24, collate_fn=test_dataset.collate_fn, shuffle=False,pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=48, num_workers=24, collate_fn=train_dataset.collate_fn, shuffle=False, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=48, num_workers=24, collate_fn=val_dataset.collate_fn, shuffle=False,pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=48, num_workers=24, collate_fn=test_dataset.collate_fn, shuffle=False,pin_memory=True)
 
 
 
@@ -248,7 +248,7 @@ import os
 
 # 假设你已经定义了模型、优化器和其他超参数
 optimizer = torch.optim.Adam(cddpm.parameters(), lr=0.001)  # 选择合适的学习率
-num_epochs = 100
+num_epochs = 200
 device = 'cuda'
 save_dir = '../checkpoints/zinc'  # 模型保存的文件夹路径
 loss_type = 'l2'
@@ -288,10 +288,10 @@ for epoch in range(num_epochs):
         ref_ligand, pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
         prompt_labels = get_prompts(batch)
 
-        pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-        pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-        pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-        pocket['size'] = ref_ligand['size'] + pocket['size']
+        pocket['mask'] = ref_ligand['mask']
+        pocket['x'] = ref_ligand['x']
+        pocket['one_hot'] = ref_ligand['one_hot']
+        pocket['size'] = ref_ligand['size']
         
         # 计算损失，返回 (nll, info)
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
@@ -341,10 +341,10 @@ for epoch in range(num_epochs):
             ref_ligand, pocket, opt_ligand= get_ligand_and_pocket(batch, virtual_nodes)
             prompt_labels = get_prompts(batch)
 
-            pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-            pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-            pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-            pocket['size'] = ref_ligand['size'] + pocket['size']
+            pocket['mask'] = ref_ligand['mask']
+            pocket['x'] = ref_ligand['x']
+            pocket['one_hot'] = ref_ligand['one_hot']
+            pocket['size'] = ref_ligand['size']
 
             delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
             loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
@@ -381,7 +381,7 @@ for epoch in range(num_epochs):
     }
 
     # 每个 epoch 后保存模型
-    torch.save(checkpoint, os.path.join(save_dir, f'cddpm_epoch_{epoch}.pth'))
+    torch.save(checkpoint, os.path.join(save_dir, f'cddpm_ligand_only_epoch_{epoch}.pth'))
 
 # 最终测试阶段
 cddpm.eval()  # 设置模型为评估模式
@@ -393,10 +393,10 @@ with torch.no_grad():  # 不需要计算梯度
         ref_ligand, pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
         prompt_labels = get_prompts(batch)
 
-        pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-        pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-        pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-        pocket['size'] = ref_ligand['size'] + pocket['size']
+        pocket['mask'] = ref_ligand['mask']
+        pocket['x'] = ref_ligand['x']
+        pocket['one_hot'] = ref_ligand['one_hot']
+        pocket['size'] = ref_ligand['size']
         
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
         loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
@@ -425,4 +425,4 @@ with torch.no_grad():  # 不需要计算梯度
 print(f'Test Loss: {test_loss / len(test_loader)}')
 
 # 最终保存模型
-torch.save(cddpm.state_dict(), os.path.join(save_dir, 'cddpm_final.pth'))
+torch.save(cddpm.state_dict(), os.path.join(save_dir, 'cddpm_ligand_only_final.pth'))

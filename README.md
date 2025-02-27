@@ -9,6 +9,12 @@
 ## the docking_results contains the opt ligand docking results with the ref pocket. And the ref-ligand, ref-pocket file.
 
 
+## first, we matched the ref ligands with the origin_docking smiles
+    python merge_smiles.py
+
+## Then, we generate the opt ligands sdf files
+    python sdf_generate.py
+
 ## We need to generate the docking_results first.
     python docking_multi.py
 

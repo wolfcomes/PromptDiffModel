@@ -115,8 +115,8 @@ def process_csv_and_generate_sdfs(csv_file, reference_dir, output_dir):
 # Example usage
 if __name__ == "__main__":
     # Define your paths
-    csv_file = "../data/generate_data/PPB_data_all.csv"  # Replace with your actual CSV file path
-    reference_dir = "../data/crossdocked_groups/group_1"  # Replace with your reference SDF directory
-    output_dir = "../data/generate_groups/group_1"  # Replace with your desired output directory
+    csv_file = "../data/generate_data/TPSA_data_all.csv"  # Replace with your actual CSV file path
+    reference_dir = "../data/crossdocked_groups/group_2"  # Replace with your reference SDF directory
+    output_dir = "../data/generate_groups/group_2"  # Replace with your desired output directory
     
     process_csv_and_generate_sdfs(csv_file, reference_dir, output_dir)

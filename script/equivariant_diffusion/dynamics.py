@@ -91,7 +91,7 @@ class EGNNDynamics(nn.Module):
             act_fn,
             nn.Linear(2 * atom_nf, atom_nf)
         )
-
+        residue_nf = residue_nf+2
         self.residue_encoder = nn.Sequential(
             nn.Linear(residue_nf, 2 * residue_nf),
             act_fn,

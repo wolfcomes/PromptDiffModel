@@ -5,35 +5,23 @@ import h5py
 
 import torch
 from torch.utils.data import Dataset
-
-from dataset import ProcessedLigandPocketDataset
+from torch.utils.data import DataLoader
+from dataset import ProcessedLigandPocketDataset,ProcessedLigandDataset
 from pathlib import Path
 import torch_geometric.transforms as T
+
 from constants import dataset_params, FLOAT_TYPE, INT_TYPE
 import utils
-from torch.utils.data import DataLoader
 from equivariant_diffusion.dynamics import EGNNDynamics
 from equivariant_diffusion.conditional_model import ConditionalDDPM
 import math
 import torch.nn.functional as F
 
-datadir = '../data/docking_results/processed_crossdock_noH_full_temp'
+datadir = '../data/zinc_npz'
+data_transform = None
 
-def get_prompts(data):
-    # 创建一个张量 [0, 0, 1]
-    prompts = torch.tensor(data['prompt_labels']).to('cuda', INT_TYPE)
-    
-    return prompts
-
+from constants import dataset_params, FLOAT_TYPE, INT_TYPE
 def get_ligand_and_pocket(data,virtual_nodes):
-    ref_ligand = {
-        'x': data['ref_lig_coords'].to('cuda', FLOAT_TYPE),
-        'one_hot': data['ref_lig_one_hot'].to('cuda', FLOAT_TYPE),
-        'size': data['num_ref_lig_atoms'].to('cuda', INT_TYPE),
-        'mask': data['ref_lig_mask'].to('cuda', INT_TYPE),
-    }
-    if virtual_nodes:
-        ref_ligand['num_virtual_atoms'] = data['num_virtual_atoms'].to('cuda', INT_TYPE)
     
     opt_ligand = {
         'x': data['opt_lig_coords'].to('cuda', FLOAT_TYPE),
@@ -51,14 +39,13 @@ def get_ligand_and_pocket(data,virtual_nodes):
         'mask': data['pocket_mask'].to('cuda', INT_TYPE)
     }
 
-    atom_num_1 = ref_ligand['one_hot'].shape[0]
+
     atom_num_2 = pocket['one_hot'].shape[0]
-    additional_tensor_1 = torch.tensor([[1, 0]]).repeat(atom_num_1, 1).to('cuda')
-    additional_tensor_2 = torch.tensor([[0, 1]]).repeat(atom_num_2, 1).to('cuda')
-    ref_ligand['one_hot'] = torch.cat((ref_ligand['one_hot'], additional_tensor_1), dim=1)
+    additional_tensor_2 = torch.tensor([[1,0]]).repeat(atom_num_2, 1).to('cuda')
     pocket['one_hot'] = torch.cat([pocket['one_hot'],additional_tensor_2],dim =1)
 
-    return ref_ligand, pocket, opt_ligand
+    return pocket, opt_ligand
+
 
 def sigma(gamma, target_tensor):
         """Computes sigma given gamma."""
@@ -146,21 +133,18 @@ class GammaNetwork(torch.nn.Module):
 
         return gamma
 
-
 dataset_info = dataset_params['crossdock_full']
-histogram_file = Path(datadir, 'size_distribution.npy')
-histogram = np.load(histogram_file).tolist()
-
-
-
 lig_type_encoder = dataset_info['atom_encoder']
 lig_type_decoder = dataset_info['atom_decoder']
 pocket_type_encoder = dataset_info['aa_encoder']
 pocket_type_decoder = dataset_info['aa_decoder']
 
+histogram_file = Path(datadir, 'size_distribution.npy')
+histogram = np.load(histogram_file).tolist()
+
 virtual_nodes = False
 data_transform = None
-max_num_nodes = len(histogram) - 1
+max_num_nodes = 100
 
 if virtual_nodes:
     # symbol = 'virtual'
@@ -183,21 +167,20 @@ atom_nf = len(lig_type_decoder)
 aa_nf = len(pocket_type_decoder)
 
 
-train_dataset = ProcessedLigandPocketDataset(Path(datadir, 'train.npz'), transform=data_transform)
-test_dataset = ProcessedLigandPocketDataset(Path(datadir, 'test.npz'), transform=data_transform)
-val_dataset = ProcessedLigandPocketDataset(Path(datadir, 'val.npz'), transform=data_transform)
+train_dataset = ProcessedLigandDataset(Path(datadir, 'train.npz'), transform=data_transform)
+test_dataset = ProcessedLigandDataset(Path(datadir, 'test.npz'), transform=data_transform)
+val_dataset = ProcessedLigandDataset(Path(datadir, 'val.npz'), transform=data_transform)
 
 
-train_loader = DataLoader(train_dataset, batch_size=8, num_workers=24, collate_fn=train_dataset.collate_fn, shuffle=False, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=8, num_workers=24, collate_fn=val_dataset.collate_fn, shuffle=False,pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=8, num_workers=24, collate_fn=test_dataset.collate_fn, shuffle=False,pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=128, num_workers=24, collate_fn=train_dataset.collate_fn, shuffle=False, pin_memory=True)
+val_loader = DataLoader(val_dataset, batch_size=128, num_workers=24, collate_fn=val_dataset.collate_fn, shuffle=False,pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=128, num_workers=24, collate_fn=test_dataset.collate_fn, shuffle=False,pin_memory=True)
 
 
 
 
 x_dims = 3
 joint_nf = 64
-
 
 net_dynamics = EGNNDynamics(
     atom_nf = atom_nf,
@@ -217,15 +200,12 @@ net_dynamics = EGNNDynamics(
     aggregation_method= 'sum' ,
     edge_cutoff_ligand=10,
     edge_cutoff_pocket=4,
-    edge_cutoff_interaction=4,
+    edge_cutoff_interaction=0.00001,
     update_pocket_coords= False,
     reflection_equivariant=True,
     edge_embedding_dim=8,
     condition_vector = True
 )
-
-
-
 
 cddpm = ConditionalDDPM(
             dynamics = net_dynamics,
@@ -241,6 +221,11 @@ cddpm = ConditionalDDPM(
             virtual_node_idx=lig_type_encoder[symbol] if virtual_nodes else None
     )
 
+def get_prompts(data):
+    # 创建一个和data长度一致的张量，每个样本是[0, 0, 0]
+    prompts = torch.zeros((len(data['opt_lig_coords']), 3),device = 'cuda')  # 返回一个大小为 [len(data), 3] 的零张量
+    prompts[:, 2] = 1
+    return prompts
 
 import torch
 from tqdm import tqdm
@@ -248,7 +233,8 @@ import os
 
 # 假设你已经定义了模型、优化器和其他超参数
 optimizer = torch.optim.Adam(cddpm.parameters(), lr=0.001)  # 选择合适的学习率
-num_epochs = 100
+scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)  # 每个epoch减小1%
+num_epochs = 20
 device = 'cuda'
 save_dir = '../checkpoints/zinc'  # 模型保存的文件夹路径
 loss_type = 'l2'
@@ -258,20 +244,22 @@ if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
 # 添加恢复训练参数
-resume_epoch = 16  # 设为None表示从头开始，设为具体数字恢复指定epoch
+resume_epoch = None  # 设为None表示从头开始，设为具体数字恢复指定epoch
 resume_checkpoint_path = os.path.join(save_dir, f'zinc_epoch_{resume_epoch}.pth') if resume_epoch is not None else None
 # 加载检查点（如果存在）
 start_epoch = 0
 if resume_epoch is not None and os.path.exists(resume_checkpoint_path):
-    checkpoint = torch.load(resume_checkpoint_path)
+    checkpoint = torch.load(resume_checkpoint_path, map_location=device)
     cddpm.load_state_dict(checkpoint['model_state_dict'])
     cddpm.to(device)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     start_epoch = checkpoint['epoch'] + 1  # 从下一个epoch开始
     print(f"Loaded checkpoint from epoch {resume_epoch}, resuming from epoch {start_epoch}")
 
+
 # 训练循环
-for epoch in range(num_epochs):
+for epoch in range(start_epoch, num_epochs):
     # 设置模型为训练模式
     cddpm.train()
     cddpm.to(device)
@@ -285,13 +273,10 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()  # 清空梯度
 
         # 提取配体和口袋数据
-        ref_ligand, pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
+        pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
+        ref_ligand = None
         prompt_labels = get_prompts(batch)
 
-        pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-        pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-        pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-        pocket['size'] = ref_ligand['size'] + pocket['size']
         
         # 计算损失，返回 (nll, info)
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
@@ -330,6 +315,7 @@ for epoch in range(num_epochs):
         pbar.set_postfix(nll_loss=nll.item())  # 更新进度条的后缀信息
 
     print(f'Epoch {epoch}, Average NLL Loss: {total_loss / len(train_loader)}')
+    scheduler.step()
 
     # 验证阶段
     cddpm.eval()  # 设置模型为评估模式
@@ -338,13 +324,9 @@ for epoch in range(num_epochs):
         for batch in val_loader:
             # batch = {key: batch[key].to(device) for key in batch}
             
-            ref_ligand, pocket, opt_ligand= get_ligand_and_pocket(batch, virtual_nodes)
+            pocket, opt_ligand= get_ligand_and_pocket(batch, virtual_nodes)
+            ref_ligand = None
             prompt_labels = get_prompts(batch)
-
-            pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-            pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-            pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-            pocket['size'] = ref_ligand['size'] + pocket['size']
 
             delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
             loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
@@ -372,16 +354,19 @@ for epoch in range(num_epochs):
 
     print(f'Epoch {epoch}, Validation Loss: {val_loss / len(val_loader)}')
 
+
+
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': cddpm.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
         'train_loss': total_loss / len(train_loader),
         'val_loss': val_loss / len(val_loader),
     }
 
     # 每个 epoch 后保存模型
-    torch.save(checkpoint, os.path.join(save_dir, f'cddpm_epoch_{epoch}.pth'))
+    torch.save(checkpoint, os.path.join(save_dir, f'zinc_epoch_{epoch}.pth'))
 
 # 最终测试阶段
 cddpm.eval()  # 设置模型为评估模式
@@ -390,13 +375,9 @@ with torch.no_grad():  # 不需要计算梯度
     for batch in test_loader:
         # batch = {key: batch[key].to(device) for key in batch}
 
-        ref_ligand, pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
+        pocket, opt_ligand = get_ligand_and_pocket(batch, virtual_nodes)
+        ref_ligand = None
         prompt_labels = get_prompts(batch)
-
-        pocket['mask'] = torch.cat([ref_ligand['mask'],pocket['mask']],dim =0)
-        pocket['x'] = torch.cat([ref_ligand['x'],pocket['x']],dim =0)
-        pocket['one_hot'] = torch.cat([ref_ligand['one_hot'],pocket['one_hot']],dim =0)
-        pocket['size'] = ref_ligand['size'] + pocket['size']
         
         delta_log_px, error_t_lig, error_t_pocket, SNR_weight, \
         loss_0_x_ligand, loss_0_x_pocket, loss_0_h, neg_log_const_0, \
@@ -425,4 +406,5 @@ with torch.no_grad():  # 不需要计算梯度
 print(f'Test Loss: {test_loss / len(test_loader)}')
 
 # 最终保存模型
-torch.save(cddpm.state_dict(), os.path.join(save_dir, 'cddpm_final.pth'))
+torch.save(cddpm.state_dict(), os.path.join(save_dir, 'zinc_final.pth'))
+

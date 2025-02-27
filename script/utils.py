@@ -212,23 +212,23 @@ class AppendVirtualNodes:
 
     def __call__(self, data):
 
-        n_virt = self.max_ligand_size - data['num_lig_atoms']
-        mu = data['lig_coords'].mean(0, keepdim=True)
-        sigma = data['lig_coords'].std(0).max()
+        n_virt = self.max_ligand_size - data['num_ref_lig_atoms']
+        mu = data['ref_lig_coords'].mean(0, keepdim=True)
+        sigma = data['ref_lig_coords'].std(0).max()
         virt_coords = torch.randn(n_virt, 3) * sigma + mu
 
         # insert virtual atom column
-        one_hot = torch.cat((data['lig_one_hot'][:, :self.vidx],
-                            torch.zeros(data['num_lig_atoms'])[:, None],
-                            data['lig_one_hot'][:, self.vidx:]), dim=1)
+        one_hot = torch.cat((data['ref_lig_one_hot'][:, :self.vidx],
+                            torch.zeros(data['num_ref_lig_atoms'])[:, None],
+                            data['ref_lig_one_hot'][:, self.vidx:]), dim=1)
         virt_one_hot = torch.zeros(n_virt, len(self.atom_encoder))
         virt_one_hot[:, self.vidx] = 1
-        virt_mask = torch.ones(n_virt) * data['lig_mask'][0]
+        virt_mask = torch.ones(n_virt) * data['ref_lig_mask'][0]
 
-        data['lig_coords'] = torch.cat((data['lig_coords'], virt_coords))
-        data['lig_one_hot'] = torch.cat((one_hot, virt_one_hot))
-        data['num_lig_atoms'] = self.max_ligand_size
-        data['lig_mask'] = torch.cat((data['lig_mask'], virt_mask))
+        data['ref_lig_coords'] = torch.cat((data['ref_lig_coords'], virt_coords))
+        data['ref_lig_one_hot'] = torch.cat((one_hot, virt_one_hot))
+        data['num_ref_lig_atoms'] = self.max_ligand_size
+        data['ref_lig_mask'] = torch.cat((data['ref_lig_mask'], virt_mask))
         data['num_virtual_atoms'] = n_virt
 
         virt_labels = data['prompt_labels'][0].repeat(n_virt, 1)

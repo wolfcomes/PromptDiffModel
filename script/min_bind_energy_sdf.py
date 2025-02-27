@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 # 设置工作目录路径
-basedir = Path('../data/docking_results/group_1')
+basedir = Path('../data/docking_results/group_2')
 
 # 用于存储所有样本的列表
 all_samples = []
