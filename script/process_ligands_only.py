@@ -23,40 +23,35 @@ import constants
 from constants import covalent_radii, dataset_params
 
 
-def process_ligand_and_pocket(pdbfile, sdffile,
-                              atom_dict, dist_cutoff, ca_only):
-    pdb_struct = PDBParser(QUIET=True).get_structure('', pdbfile)
-
+def process_ligand(sdffile, atom_dict):
     try:
         ligand = Chem.SDMolSupplier(str(sdffile), sanitize=False)[0]
     except:
         raise Exception(f'cannot read sdf mol ({sdffile})')
     if ligand is None:
         print(f"Error: Failed to load ligand from {sdffile}")
-    # remove H atoms if not in atom_dict, other atom types that aren't allowed
-    # should stay so that the entire ligand can be removed from the dataset
-    # lig_atoms = [a.GetSymbol() for a in ligand.GetAtoms()
-    #              if (a.GetSymbol().capitalize() in atom_dict or a.GetSymbol() != 'H')]
-    # lig_coords = np.array([list(ligand.GetConformer(0).GetAtomPosition(idx))
-    #                        for idx in range(ligand.GetNumAtoms())])
+        
     lig_atoms = []
-    lig_coords=[]
-    bonds_info = []  # To store bond information (atom indices and bond types)
+    lig_coords = []
     atom_mapping = {}
  
     for idx, a in enumerate(ligand.GetAtoms()):
-    # Only include atoms that are in atom_dict or are not hydrogen
         if (a.GetSymbol().capitalize() in atom_dict or a.GetSymbol() != 'H'):
-            lig_atoms.append(a.GetSymbol())  # Add atom symbol
+            lig_atoms.append(a.GetSymbol())
             atom_mapping[len(lig_atoms) - 1] = idx
-            # Add atom coordinates only if it's not a hydrogen atom
             if a.GetSymbol() != 'H':
                 lig_coords.append(list(ligand.GetConformer(0).GetAtomPosition(idx)))
 
-    # Convert lig_coords to a numpy array
     lig_coords = np.array(lig_coords)
 
-
+    non_h_atoms = []
+    for idx, a in enumerate(ligand.GetAtoms()):
+        atom_symbol = a.GetSymbol().capitalize()
+        if atom_symbol != 'H':
+            non_h_atoms.append({
+                'idx': idx,
+                'symbol': atom_symbol
+            })
 
 
     non_h_atoms = []
@@ -122,72 +117,15 @@ def process_ligand_and_pocket(pdbfile, sdffile,
             for a in lig_atoms
         ])
     except KeyError as e:
-        raise KeyError(
-            f'{e} not in atom dict ({sdffile})')
+        raise KeyError(f'{e} not in atom dict ({sdffile})')
 
-    # Find interacting pocket residues based on distance cutoff
-    pocket_residues = []
-    for residue in pdb_struct[0].get_residues():
-        res_coords = np.array([a.get_coord() for a in residue.get_atoms()])
-        if is_aa(residue.get_resname(), standard=True) and \
-                (((res_coords[:, None, :] - lig_coords[None, :, :]) ** 2).sum(
-                    -1) ** 0.5).min() < dist_cutoff:
-            pocket_residues.append(residue)
-
-    pocket_ids = [f'{res.parent.id}:{res.id[1]}' for res in pocket_residues]
     ligand_data = {
         'lig_coords': lig_coords,
         'lig_one_hot': lig_one_hot,
         'lig_bonds': bonds_info_matrix
     }
-    if ca_only:
-        try:
-            pocket_one_hot = []
-            full_coords = []
-            for res in pocket_residues:
-                for atom in res.get_atoms():
-                    if atom.name == 'CA':
-                        pocket_one_hot.append(np.eye(1, len(amino_acid_dict),
-                                                     amino_acid_dict[three_to_one(res.get_resname())]).squeeze())
-                        full_coords.append(atom.coord)
-            pocket_one_hot = np.stack(pocket_one_hot)
-            full_coords = np.stack(full_coords)
-        except KeyError as e:
-            raise KeyError(
-                f'{e} not in amino acid dict ({pdbfile}, {sdffile})')
-        pocket_data = {
-            'pocket_coords': full_coords,
-            'pocket_one_hot': pocket_one_hot,
-            'pocket_ids': pocket_ids
-        }
-    else:
-        full_atoms = np.concatenate(
-            [np.array([atom.element for atom in res.get_atoms()])
-             for res in pocket_residues], axis=0)
-        full_coords = np.concatenate(
-            [np.array([atom.coord for atom in res.get_atoms()])
-             for res in pocket_residues], axis=0)
-        try:
-            pocket_one_hot = []
-            for a in full_atoms:
-                if a in amino_acid_dict:
-                    atom = np.eye(1, len(amino_acid_dict),
-                                  amino_acid_dict[a.capitalize()]).squeeze()
-                elif a != 'H':
-                    atom = np.eye(1, len(amino_acid_dict),
-                                  len(amino_acid_dict)).squeeze()
-                pocket_one_hot.append(atom)
-            pocket_one_hot = np.stack(pocket_one_hot)
-        except KeyError as e:
-            raise KeyError(
-                f'{e} not in atom dict ({pdbfile})')
-        pocket_data = {
-            'pocket_coords': full_coords,
-            'pocket_one_hot': pocket_one_hot,
-            'pocket_ids': pocket_ids
-        }
-    return ligand_data, pocket_data
-
+    
+    return ligand_data
 
 def compute_smiles(positions, one_hot, mask):
     print("Computing SMILES ...")
@@ -305,334 +243,217 @@ def get_type_histograms(lig_one_hot, pocket_one_hot, atom_encoder, aa_encoder):
     return atom_counts, aa_counts
 
 
-def saveall(filename, pdb_and_mol_ids, ref_lig_coords, ref_lig_one_hot,ref_lig_bonds, ref_lig_mask,
-            pocket_coords, pocket_one_hot, pocket_mask, prompt_labels,opt_lig_coords,
-                opt_lig_one_hot,opt_lig_bond, opt_lig_mask):
+def saveall(filename, mol_ids, ref_lig_coords, ref_lig_one_hot, ref_lig_bonds, ref_lig_mask,
+            pocket_coords, pocket_one_hot, pocket_mask,
+            prompt_labels, opt_lig_coords, opt_lig_one_hot, opt_lig_bond, opt_lig_mask):
     np.savez(filename,
-             names=pdb_and_mol_ids,
+             names=mol_ids,
              prompt_labels=prompt_labels,
              ref_lig_coords=ref_lig_coords,
              ref_lig_one_hot=ref_lig_one_hot,
-             ref_lig_bonds = ref_lig_bonds,
+             ref_lig_bonds=ref_lig_bonds,
              ref_lig_mask=ref_lig_mask,
+             opt_lig_coords=opt_lig_coords,
+             opt_lig_one_hot=opt_lig_one_hot,
+             opt_lig_bond=opt_lig_bond, 
+             opt_lig_mask=opt_lig_mask,
              pocket_coords=pocket_coords,
              pocket_one_hot=pocket_one_hot,
-             pocket_mask=pocket_mask,
-             opt_lig_coords = opt_lig_coords,
-             opt_lig_one_hot = opt_lig_one_hot,
-             opt_lig_bond = opt_lig_bond, 
-             opt_lig_mask = opt_lig_mask
+             pocket_mask=pocket_mask
              )
     return True
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('basedir', type=Path)
+    parser.add_argument('--ref_dir', type=Path, help='Directory containing reference molecules')
+    parser.add_argument('--opt_dir', type=Path, help='Directory containing optimized molecules')
     parser.add_argument('--outdir', type=Path, default=None)
-    parser.add_argument('--no_H', action='store_true')
-    parser.add_argument('--ca_only', action='store_true')
-    parser.add_argument('--dist_cutoff', type=float, default=8.0)
     parser.add_argument('--random_seed', type=int, default=42)
+    parser.add_argument('--val_size', type=float, default=0.1, help='Validation set size ratio')
+    parser.add_argument('--test_size', type=float, default=0.1, help='Test set size ratio')
     args = parser.parse_args()
 
-    datadir = '../data/docking_results/group_2/'
+    # 设置随机种子
+    random.seed(args.random_seed)
+    np.random.seed(args.random_seed)
 
-    if args.ca_only:
-        dataset_info = dataset_params['crossdock']
-    else:
-        dataset_info = dataset_params['crossdock_full']
-    amino_acid_dict = dataset_info['aa_encoder']
+    dataset_info = dataset_params['crossdock_full']
     atom_dict = dataset_info['atom_encoder']
     atom_decoder = dataset_info['atom_decoder']
+    aa_encoder = dataset_info['aa_encoder']
 
     # Make output directory
     if args.outdir is None:
-        suffix = '_crossdock' if 'H' in atom_dict else '_crossdock_noH'
-        suffix += '_ca_only_temp' if args.ca_only else '_full_temp'
-        processed_dir = Path(args.basedir, f'processed{suffix}')
+        processed_dir = Path('processed_ligands')
     else:
         processed_dir = args.outdir
 
     processed_dir.mkdir(exist_ok=True, parents=True)
 
-    # Read data split
-    split_path = Path(args.basedir, 'split_by_name_2.pt')
-    data_split = torch.load(split_path)
+    # 用于存储所有处理好的数据
+    all_data = {
+        'ref_lig_coords': [],
+        'ref_lig_one_hot': [],
+        'ref_lig_bond': [],
+        'ref_lig_mask': [],
+        'opt_lig_coords': [],
+        'opt_lig_one_hot': [],
+        'opt_lig_bond': [],
+        'opt_lig_mask': [],
+        'pocket_coords': [],
+        'pocket_one_hot': [],
+        'pocket_mask': [],
+        'mol_ids': []
+    }
+    
+    count = 0
+    
+    # 记录失败的情况
+    failed_pairs = []
+    failed_ref_process = []
+    failed_opt_process = []
 
-    # There is no validation set, copy 300 training examples (the validation set
-    # is not very important in this application)
-    # Note: before we had a data leak but it should not matter too much as most
-    # metrics monitored during training are independent of the pockets
-    data_split['val'] = random.sample(data_split['train'], 20)
+    # 获取所有子目录
+    ref_subdirs = [d for d in args.ref_dir.iterdir() if d.is_dir()]
+    print(f"Found {len(ref_subdirs)} subdirectories")
+    
+    # 处理所有分子数据
+    for ref_subdir in ref_subdirs:
+        opt_subdir = args.opt_dir / ref_subdir.name
+        if not opt_subdir.exists():
+            print(f"Warning: No matching optimized directory for {ref_subdir}")
+            continue
 
-    n_train_before = len(data_split['train'])
-    n_val_before = len(data_split['val'])
-    n_test_before = len(data_split['test'])
-
-    failed_save = []
-
-    n_samples_after = {}
-    for split in data_split.keys():
-        ref_lig_coords = []
-        ref_lig_one_hot = []
-        ref_lig_bond = []
-        ref_lig_mask = []
-        pocket_coords = []
-        pocket_one_hot = []
-        pocket_mask = []
-        pdb_and_mol_ids = []
-        count_protein = []
-        count_ligand = []
-        count_total = []
-        opt_lig_coords = []
-        opt_lig_one_hot = []
-        opt_lig_bond = []
-        opt_lig_mask = []
-        count = 0
-
-        pdb_sdf_dir = processed_dir / split
-        pdb_sdf_dir.mkdir(exist_ok=True)
-
-        tic = time()
-        num_failed = 0
-        pbar = tqdm(data_split[split])
-        pbar.set_description(f'#failed: {num_failed}')
-
-        for sample_pairs in pbar:
-            opt_lig_id = 0
-            ref_lig_id = 0
-            for (pocket_fn, ligand_fn) in sample_pairs:
-            
-                datadir = Path(datadir)
-                sdffile = datadir / f'{ligand_fn}'
-                pdbfile = datadir / f'{pocket_fn}'
-
-                if ligand_fn.endswith("minimized.sdf"):
-                    ligand_type = 1
-                else:
-                    ligand_type = 0
-
-                try:
-                    struct_copy = PDBParser(QUIET=True).get_structure('', pdbfile)
-                except:
-                    num_failed += 1
-                    failed_save.append((pocket_fn, ligand_fn))
-                    print(failed_save[-1])
-                    pbar.set_description(f'#failed: {num_failed}')
-                    continue
-
-                try:
-                    ligand_data, pocket_data = process_ligand_and_pocket(
-                        pdbfile, sdffile,
-                        atom_dict=atom_dict, dist_cutoff=args.dist_cutoff,
-                        ca_only=args.ca_only)
-                except (KeyError, AssertionError, FileNotFoundError, IndexError,
-                        ValueError) as e:
-                    print(type(e).__name__, e, pocket_fn, ligand_fn)
-                    num_failed += 1
-                    pbar.set_description(f'#failed: {num_failed}')
-                    continue
-                
-                if ligand_type == 0:
-                    pdb_and_mol_ids.append(f"{pocket_fn}_{ligand_fn}")
-                    ref_lig_coords.append(ligand_data['lig_coords'])
-                    ref_lig_one_hot.append(ligand_data['lig_one_hot'])
-                    ref_lig_bond.append(ligand_data['lig_bonds'])
-                    ref_lig_mask.append(count * np.ones(len(ligand_data['lig_coords'])))
-                    pocket_coords.append(pocket_data['pocket_coords'])
-                    pocket_one_hot.append(pocket_data['pocket_one_hot'])
-                    pocket_mask.append(
-                        count * np.ones(len(pocket_data['pocket_coords'])))
-                    count_protein.append(pocket_data['pocket_coords'].shape[0])
-                    count_ligand.append(ligand_data['lig_coords'].shape[0])
-                    count_total.append(pocket_data['pocket_coords'].shape[0] + ligand_data['lig_coords'].shape[0])
-                    ref_lig_id += 1
-                if ligand_type == 1:
-                    
-                    opt_lig_coords.append(ligand_data['lig_coords'])
-                    opt_lig_one_hot.append(ligand_data['lig_one_hot'])
-                    opt_lig_bond.append(ligand_data['lig_bonds'])
-                    opt_lig_mask.append((count+opt_lig_id) * np.ones(len(ligand_data['lig_coords'])))
-                    opt_lig_id += 1
-                    
-                
-                if split in {'val', 'test'}:
-                    # Copy PDB file
-                    new_rec_name = Path(pdbfile).stem.replace('_', '-')
-                    pdb_file_out = Path(pdb_sdf_dir, f"{new_rec_name}.pdb")
-                    shutil.copy(pdbfile, pdb_file_out)
-
-                    # Copy SDF file
-                    new_lig_name = new_rec_name + '_' + Path(sdffile).stem.replace('_', '-')
-                    sdf_file_out = Path(pdb_sdf_dir, f'{new_lig_name}.sdf')
-                    shutil.copy(sdffile, sdf_file_out)
-
-                    # specify pocket residues
-                    with open(Path(pdb_sdf_dir, f'{new_lig_name}.txt'), 'w') as f:
-                        f.write(' '.join(pocket_data['pocket_ids']))
-            
-            
-            # sample_pairs 循环结束后检查 opt 部分是否为空
-            if opt_lig_id == 0 and ref_lig_id != 0:
-                for i in range(ref_lig_id):
-                    ref_lig_coords.pop()
-                    ref_lig_one_hot.pop()
-                    ref_lig_bond.pop()
-                    ref_lig_mask.pop()
-                    pocket_coords.pop()
-                    pocket_one_hot.pop()
-                    pocket_mask.pop()
-                    pdb_and_mol_ids.pop()
-                    count_protein.pop()
-                    count_ligand.pop()
-                    count_total.pop()
-            
-
-                
-            
-            if opt_lig_id >= 2:
-                # 复制最后一个元素 `opt_lig_id - 1` 次
-                for j in range(1,opt_lig_id):
-                    ref_lig_coords.append(ref_lig_coords[-1])
-                    ref_lig_one_hot.append(ref_lig_one_hot[-1])
-                    ref_lig_bond.append(ref_lig_bond[-1])
-                    ref_lig_mask.append(ref_lig_mask[-1]+1)
-                    pocket_coords.append(pocket_coords[-1])
-                    pocket_one_hot.append(pocket_one_hot[-1])
-                    pocket_mask.append(pocket_mask[-1]+1)
-                    pdb_and_mol_ids.append(pdb_and_mol_ids[-1])
-                    count_protein.append(count_protein[-1])
-                    count_ligand.append(count_ligand[-1])
-                    count_total.append(count_total[-1])
-            
-            if opt_lig_id != 0 and ref_lig_id == 0:
-                for i in range(opt_lig_id):
-                    opt_lig_coords.pop()
-                    opt_lig_one_hot.pop()
-                    opt_lig_bond.pop()
-                    opt_lig_mask.pop()
-                count -= opt_lig_id
-
-            count += opt_lig_id
-
-            # for i in range(len(opt_lig_coords)):
-            #     if len(opt_lig_coords[i]) > 0:
-            #         print(len(opt_lig_coords[i]))
-            #         opt_lig_coords[i] = np.concatenate(opt_lig_coords[i], axis=0)
-            #         opt_lig_one_hot[i] = np.concatenate(opt_lig_one_hot[i], axis=0)
-            #         opt_lig_bond[i] = np.concatenate(opt_lig_bond[i], axis=0)
-            #         #opt_lig_mask[i] = np.concatenate(opt_lig_mask[i], axis=0)
-            #     else:
-            #         # 假设每个 ligand 坐标的形状是 (n, 3)
-            #         opt_lig_coords[i] = np.empty((0, 3))
-            #         opt_lig_one_hot[i] = np.empty((0, 10))
-            #         opt_lig_bond[i] = np.empty((0, 2))
-            #         #opt_lig_mask[i] = np.empty((0,))
-
-
-
-
-        print(len(ref_lig_coords))
-        print(len(ref_lig_one_hot))
-        ref_lig_coords = np.concatenate(ref_lig_coords, axis=0)
-        ref_lig_one_hot = np.concatenate(ref_lig_one_hot, axis=0)
-        ref_lig_bond = np.concatenate(ref_lig_bond, axis=0)
-        ref_lig_mask = np.concatenate(ref_lig_mask, axis=0)
+        ref_files = list(ref_subdir.glob('*.sdf'))
+        print(f"\nProcessing subdirectory {ref_subdir.name}: {len(ref_files)} reference molecules")
         
-        pocket_coords = np.concatenate(pocket_coords, axis=0)
-        pocket_one_hot = np.concatenate(pocket_one_hot, axis=0)
-        pocket_mask = np.concatenate(pocket_mask, axis=0)
-        opt_lig_coords = np.concatenate(opt_lig_coords, axis=0)
-        opt_lig_one_hot = np.concatenate(opt_lig_one_hot, axis=0)
-        opt_lig_bond = np.concatenate(opt_lig_bond, axis=0)
-        opt_lig_mask = np.concatenate(opt_lig_mask, axis=0)
-        prompt_labels = np.tile([0, 0, 1], (len(opt_lig_coords), 1))
-        print(len(ref_lig_coords))
-        print(len(ref_lig_one_hot))
+        for ref_file in tqdm(ref_files):
+            try:
+                try:
+                    ref_data = process_ligand(ref_file, atom_dict)
+                except Exception as e:
+                    failed_ref_process.append((str(ref_file), str(e)))
+                    print(f"Error processing reference molecule {ref_file}: {e}")
+                    continue
 
+                # 查找所有对应的优化后分子
+                opt_files = list(opt_subdir.glob(f"*.sdf"))
+                
+                if not opt_files:
+                    failed_pairs.append(str(ref_file))
+                    print(f"Warning: No optimized molecules found for {ref_file}")
+                    continue
 
-        saveall(processed_dir / f'{split}.npz', pdb_and_mol_ids, ref_lig_coords,
-                ref_lig_one_hot,ref_lig_bond, ref_lig_mask, pocket_coords,
-                pocket_one_hot, pocket_mask, prompt_labels, opt_lig_coords,
-                opt_lig_one_hot,opt_lig_bond, opt_lig_mask)
+                for opt_file in opt_files:
+                    try:
+                        opt_data = process_ligand(opt_file, atom_dict)
+                    except Exception as e:
+                        failed_opt_process.append((str(opt_file), str(e)))
+                        print(f"Error processing optimized molecule {opt_file}: {e}")
+                        continue
 
-        n_samples_after[split] = len(pdb_and_mol_ids)
-        print(f"Processing {split} set took {(time() - tic) / 60.0:.2f} minutes")
+                    all_data['mol_ids'].append(f"{ref_subdir.name}/{ref_file.stem}->{opt_file.stem}")
+                    all_data['ref_lig_coords'].append(ref_data['lig_coords'])
+                    all_data['ref_lig_one_hot'].append(ref_data['lig_one_hot'])
+                    all_data['ref_lig_bond'].append(ref_data['lig_bonds'])
+                    all_data['ref_lig_mask'].append(count * np.ones(len(ref_data['lig_coords'])))
+                    all_data['opt_lig_coords'].append(opt_data['lig_coords'])
+                    all_data['opt_lig_one_hot'].append(opt_data['lig_one_hot'])
+                    all_data['opt_lig_bond'].append(opt_data['lig_bonds'])
+                    all_data['opt_lig_mask'].append(count * np.ones(len(opt_data['lig_coords'])))
+                    all_data['pocket_coords'].append(np.array([[0.0, 0.0, 0.0]]))
+                    all_data['pocket_one_hot'].append(np.eye(1, len(aa_encoder), len(aa_encoder)-1))
+                    all_data['pocket_mask'].append(count * np.ones(1))
+                    count += 1
+                
+            except Exception as e:
+                print(f"Unexpected error processing {ref_file}: {e}")
+                continue
 
-    # --------------------------------------------------------------------------
-    # Compute statistics & additional information
-    # --------------------------------------------------------------------------
-    with np.load(processed_dir / 'train.npz', allow_pickle=True) as data:
-        ref_lig_mask = data['ref_lig_mask']
-        ref_lig_coords = data['ref_lig_coords']
-        ref_lig_one_hot = data['ref_lig_one_hot']
-        ref_lig_bonds = data['ref_lig_bonds']
-        opt_lig_mask = data['opt_lig_mask']
-        opt_lig_coords = data['opt_lig_coords']
-        opt_lig_one_hot = data['opt_lig_one_hot']
-        opt_lig_bond = data['opt_lig_bond']
-        pocket_mask = data['pocket_mask']
-        pocket_one_hot = data['pocket_one_hot']
+    print(f"\nProcessing Summary:")
+    print(f"Total subdirectories processed: {len(ref_subdirs)}")
+    print(f"Successfully processed pairs: {count}")
+    print(f"Failed to find optimized pairs: {len(failed_pairs)}")
+    print(f"Failed to process reference molecules: {len(failed_ref_process)}")
+    print(f"Failed to process optimized molecules: {len(failed_opt_process)}")
 
-    # Compute SMILES for all training examples
-    train_smiles = compute_smiles(opt_lig_coords, opt_lig_one_hot, opt_lig_mask)
-    np.save(processed_dir / 'train_smiles.npy', train_smiles)
+    if count == 0:
+        print("No valid molecule pairs were processed. Exiting...")
+        exit(1)
 
-    # Joint histogram of number of ligand and pocket nodes
-    n_nodes = get_n_nodes(opt_lig_mask, pocket_mask, smooth_sigma=1.0)
-    np.save(Path(processed_dir, 'size_distribution.npy'), n_nodes)
-
-    # Convert bond length dictionaries to arrays for batch processing
-    bonds1, bonds2, bonds3 = get_bond_length_arrays(atom_dict)
-
-    # Get bond length definitions for Lennard-Jones potential
-    rm_LJ = get_lennard_jones_rm(atom_dict)
-
-    # Get histograms of ligand and pocket node types
-    atom_hist, aa_hist = get_type_histograms(opt_lig_one_hot, pocket_one_hot,
-                                             atom_dict, amino_acid_dict)
-
-    # Create summary string
-    summary_string = '# SUMMARY\n\n'
-    summary_string += '# Before processing\n'
-    summary_string += f'num_samples train: {n_train_before}\n'
-    summary_string += f'num_samples val: {n_val_before}\n'
-    summary_string += f'num_samples test: {n_test_before}\n\n'
-    summary_string += '# After processing\n'
-    summary_string += f"num_samples train: {n_samples_after['train']}\n"
-    summary_string += f"num_samples val: {n_samples_after['val']}\n"
-    summary_string += f"num_samples test: {n_samples_after['test']}\n\n"
-    summary_string += '# Info\n'
-    summary_string += f"'atom_encoder': {atom_dict}\n"
-    summary_string += f"'atom_decoder': {list(atom_dict.keys())}\n"
-    summary_string += f"'aa_encoder': {amino_acid_dict}\n"
-    summary_string += f"'aa_decoder': {list(amino_acid_dict.keys())}\n"
-    summary_string += f"'bonds1': {bonds1.tolist()}\n"
-    summary_string += f"'bonds2': {bonds2.tolist()}\n"
-    summary_string += f"'bonds3': {bonds3.tolist()}\n"
-    summary_string += f"'lennard_jones_rm': {rm_LJ.tolist()}\n"
-    summary_string += f"'atom_hist': {atom_hist}\n"
-    summary_string += f"'aa_hist': {aa_hist}\n"
-    summary_string += f"'n_nodes': {n_nodes.tolist()}\n"
-
-    sns.distplot(count_protein)
-    plt.savefig(processed_dir / 'protein_size_distribution.png')
-    plt.clf()
-
-    sns.distplot(count_ligand)
-    plt.savefig(processed_dir / 'lig_size_distribution.png')
-    plt.clf()
-
-    sns.distplot(count_total)
-    plt.savefig(processed_dir / 'total_size_distribution.png')
-    plt.clf()
-
-    # Write summary to text file
-    with open(processed_dir / 'summary.txt', 'w') as f:
-        f.write(summary_string)
-
-    # Print summary
-    print(summary_string)
-
-    print(failed_save)
+    # 划分数据集
+    try:
+        indices = list(range(count))
+        random.shuffle(indices)
+        
+        test_count = int(count * args.test_size)
+        val_count = int(count * args.val_size)
+        train_count = count - test_count - val_count
+        
+        splits = {
+            'train': indices[:train_count],
+            'val': indices[train_count:train_count + val_count],
+            'test': indices[train_count + val_count:]
+        }
+        
+        print(f"\nDataset split:")
+        print(f"Train set: {len(splits['train'])} samples")
+        print(f"Validation set: {len(splits['val'])} samples")
+        print(f"Test set: {len(splits['test'])} samples")
+        
+        # 保存每个数据集
+        for split_name, split_indices in splits.items():
+            if len(split_indices) == 0:
+                continue
+                
+            split_data = {
+                'mol_ids': [all_data['mol_ids'][i] for i in split_indices],
+                'ref_lig_coords': np.concatenate([all_data['ref_lig_coords'][i] for i in split_indices], axis=0),
+                'ref_lig_one_hot': np.concatenate([all_data['ref_lig_one_hot'][i] for i in split_indices], axis=0),
+                'ref_lig_bond': np.concatenate([all_data['ref_lig_bond'][i] for i in split_indices], axis=0),
+                'ref_lig_mask': np.concatenate([all_data['ref_lig_mask'][i] for i in split_indices], axis=0),
+                'opt_lig_coords': np.concatenate([all_data['opt_lig_coords'][i] for i in split_indices], axis=0),
+                'opt_lig_one_hot': np.concatenate([all_data['opt_lig_one_hot'][i] for i in split_indices], axis=0),
+                'opt_lig_bond': np.concatenate([all_data['opt_lig_bond'][i] for i in split_indices], axis=0),
+                'opt_lig_mask': np.concatenate([all_data['opt_lig_mask'][i] for i in split_indices], axis=0),
+                'pocket_coords': np.concatenate([all_data['pocket_coords'][i] for i in split_indices], axis=0),
+                'pocket_one_hot': np.concatenate([all_data['pocket_one_hot'][i] for i in split_indices], axis=0),
+                'pocket_mask': np.concatenate([all_data['pocket_mask'][i] for i in split_indices], axis=0),
+            }
+            
+            prompt_labels = np.tile([0, 0, 1], (len(split_data['opt_lig_coords']), 1))
+            
+            # 保存数据
+            saveall(processed_dir / f'{split_name}.npz', 
+                    split_data['mol_ids'], 
+                    split_data['ref_lig_coords'],
+                    split_data['ref_lig_one_hot'],
+                    split_data['ref_lig_bond'], 
+                    split_data['ref_lig_mask'],
+                    split_data['pocket_coords'],
+                    split_data['pocket_one_hot'],
+                    split_data['pocket_mask'],
+                    prompt_labels,
+                    split_data['opt_lig_coords'],
+                    split_data['opt_lig_one_hot'],
+                    split_data['opt_lig_bond'], 
+                    split_data['opt_lig_mask'])
+                
+        # 保存失败记录
+        with open(processed_dir / 'processing_failures.txt', 'w') as f:
+            f.write("Missing optimized pairs:\n")
+            for pair in failed_pairs:
+                f.write(f"{pair}\n")
+            f.write("\nFailed reference molecules:\n")
+            for mol, error in failed_ref_process:
+                f.write(f"{mol}: {error}\n")
+            f.write("\nFailed optimized molecules:\n")
+            for mol, error in failed_opt_process:
+                f.write(f"{mol}: {error}\n")
+                
+        print(f"\nProcessed data saved to {processed_dir}")
+        print(f"Processing failures logged to {processed_dir}/processing_failures.txt")
+        
+    except Exception as e:
+        print(f"Error saving processed data: {e}")
+        exit(1)

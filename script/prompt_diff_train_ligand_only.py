@@ -17,7 +17,7 @@ from equivariant_diffusion.conditional_model import ConditionalDDPM
 import math
 import torch.nn.functional as F
 
-datadir = '../data/docking_results/processed_crossdock_noH_full_temp'
+datadir = '../data/ligand_only'
 
 def get_prompts(data):
     # 创建一个张量 [0, 0, 1]
@@ -29,7 +29,7 @@ def get_ligand_and_pocket(data,virtual_nodes):
     ref_ligand = {
         'x': data['ref_lig_coords'].to('cuda', FLOAT_TYPE),
         'one_hot': data['ref_lig_one_hot'].to('cuda', FLOAT_TYPE),
-        'size': data['num_ref_lig_atoms'].to('cuda', INT_TYPE),
+        'size': data['num_ref_lig_atoms'].to('cuda', INT_TYPE), 
         'mask': data['ref_lig_mask'].to('cuda', INT_TYPE),
     }
     if virtual_nodes:

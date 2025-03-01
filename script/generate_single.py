@@ -298,7 +298,7 @@ prompt_labels = torch.tensor([[0,0,1]]).repeat(28, 1).to('cuda')
 
 device = 'cuda'
 #checkpoint = torch.load('../checkpoints/zinc/cddpm_epoch_45.pth')
-checkpoint = torch.load('../checkpoints/zinc/cddpm_ligand_only_epoch_32.pth')
+checkpoint = torch.load('../checkpoints/zinc/cddpm_ligand_only_epoch_100.pth')
 #checkpoint = torch.load('../checkpoints/chembl/chembl_epoch_5.pth')
 #checkpoint = torch.load('../checkpoints/cddpm/cddpm_epoch_250.pth')
 
