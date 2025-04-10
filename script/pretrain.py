@@ -180,7 +180,7 @@ test_loader = DataLoader(test_dataset, batch_size=128, num_workers=24, collate_f
 
 
 x_dims = 3
-joint_nf = 64
+joint_nf = 128
 
 net_dynamics = EGNNDynamics(
     atom_nf = atom_nf,
@@ -188,7 +188,7 @@ net_dynamics = EGNNDynamics(
     n_dims = x_dims,
     joint_nf = joint_nf,
     device='cuda',
-    hidden_nf= 128,
+    hidden_nf= 256,
     act_fn=torch.nn.SiLU(),
     n_layers= 5,
     attention= True,
@@ -233,8 +233,8 @@ import os
 
 # 假设你已经定义了模型、优化器和其他超参数
 optimizer = torch.optim.Adam(cddpm.parameters(), lr=0.001)  # 选择合适的学习率
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)  # 每个epoch减小1%
-num_epochs = 20
+scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.97)  # 每个epoch减小1%
+num_epochs = 100
 device = 'cuda'
 save_dir = '../checkpoints/zinc'  # 模型保存的文件夹路径
 loss_type = 'l2'

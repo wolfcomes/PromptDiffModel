@@ -25,12 +25,19 @@ from constants import covalent_radii, dataset_params
 
 def process_ligand(sdffile, atom_dict):
     try:
-        ligand = Chem.SDMolSupplier(str(sdffile), sanitize=False)[0]
+        # 读取SDF文件中的分子
+        suppl = Chem.SDMolSupplier(str(sdffile), sanitize=False)
+        ligand = suppl[0]
     except:
         raise Exception(f'cannot read sdf mol ({sdffile})')
     if ligand is None:
         print(f"Error: Failed to load ligand from {sdffile}")
         
+    # 从SDF文件提取PropertyChanges数据
+    property_changes = None
+    if ligand.HasProp("PropertyChanges"):
+        property_changes = ligand.GetProp("PropertyChanges")
+    
     lig_atoms = []
     lig_coords = []
     atom_mapping = {}
@@ -110,6 +117,8 @@ def process_ligand(sdffile, atom_dict):
             if np.array_equal(bonds_info_matrix[i, j], np.array([0, 0, 0, 0, 0, 0, 0])):
                 bonds_info_matrix[i, j] = bond_type_map['NONE']
 
+    # 提取SMILES字符串
+    smiles = Chem.MolToSmiles(ligand)
 
     try:
         lig_one_hot = np.stack([
@@ -122,10 +131,62 @@ def process_ligand(sdffile, atom_dict):
     ligand_data = {
         'lig_coords': lig_coords,
         'lig_one_hot': lig_one_hot,
-        'lig_bonds': bonds_info_matrix
+        'lig_bonds': bonds_info_matrix,
+        'smiles': smiles,  # SMILES字符串
+        'property_changes': property_changes  # 添加属性变化数据
     }
     
     return ligand_data
+
+def generate_prompt_labels(property_changes, all_properties=None):
+    """
+    根据property_changes字符串生成对应的prompt_labels
+    
+    Args:
+        property_changes: 属性变化字符串，如"AMES:1 BBB_Martins:-1 ..."
+        all_properties: 要包含的所有属性列表，如果为None，则使用默认值
+        
+    Returns:
+        numpy数组形式的prompt_labels
+    """
+    # 解析property_changes
+    properties = {}
+    
+    if property_changes:
+        for item in property_changes.split():
+            if ':' in item:
+                prop, value = item.split(':')
+                properties[prop] = int(value)
+    
+    # 如果未指定关注的属性列表，则使用默认值
+    if all_properties is None:
+        all_properties = ["Solubility_AqSolDB", "Lipophilicity_AstraZeneca", "Caco2_Wang", "PAMPA_NCATS", 
+                          "HIA_Hou", "Pgp_Broccatelli", "BBB_Martins", "Bioavailability_Ma", "HydrationFreeEnergy_FreeSolv"]
+    
+    # 初始化空的prompt_labels模板（长度为属性数量）
+    prompt_labels = np.zeros(len(all_properties) + 1)  # 加1是因为最后一位表示"提高总体属性"
+    
+    # 统计变化（提高、降低、不变）
+    improved = 0
+    decreased = 0
+    unchanged = 0
+    
+    # 填充各属性的变化
+    for i, prop in enumerate(all_properties):
+        if prop in properties:
+            value = properties[prop]
+            prompt_labels[i] = value
+            if value > 0:
+                improved += 1
+            elif value < 0:
+                decreased += 1
+            else:
+                unchanged += 1
+    
+    # 最后一位表示总体情况：如果改进的属性多于降低的，设为1，否则设为0
+    prompt_labels[-1] = 1 if improved > decreased else 0
+    
+    return prompt_labels
 
 def compute_smiles(positions, one_hot, mask):
     print("Computing SMILES ...")
@@ -265,13 +326,17 @@ def saveall(filename, mol_ids, ref_lig_coords, ref_lig_one_hot, ref_lig_bonds, r
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ref_dir', type=Path, help='Directory containing reference molecules')
-    parser.add_argument('--opt_dir', type=Path, help='Directory containing optimized molecules')
+    parser.add_argument('--ref_dir', type=Path, nargs='+', help='Directory or multiple directories containing reference molecules')
+    parser.add_argument('--opt_dir', type=Path, nargs='+', help='Directory or multiple directories containing optimized molecules')
     parser.add_argument('--outdir', type=Path, default=None)
     parser.add_argument('--random_seed', type=int, default=42)
     parser.add_argument('--val_size', type=float, default=0.1, help='Validation set size ratio')
     parser.add_argument('--test_size', type=float, default=0.1, help='Test set size ratio')
     args = parser.parse_args()
+
+    # 检查ref_dir和opt_dir参数数量是否一致
+    if len(args.ref_dir) != len(args.opt_dir):
+        raise ValueError("参考分子目录和优化分子目录的数量必须相同")
 
     # 设置随机种子
     random.seed(args.random_seed)
@@ -303,7 +368,10 @@ if __name__ == '__main__':
         'pocket_coords': [],
         'pocket_one_hot': [],
         'pocket_mask': [],
-        'mol_ids': []
+        'mol_ids': [],
+        'ref_smiles': [],  # 存储参考分子的SMILES
+        'opt_smiles': [],  # 存储优化分子的SMILES
+        'property_changes': []  # 存储属性变化数据
     }
     
     count = 0
@@ -312,74 +380,125 @@ if __name__ == '__main__':
     failed_pairs = []
     failed_ref_process = []
     failed_opt_process = []
+    skipped_too_many_ref = []
+    skipped_no_opt = []
 
-    # 获取所有子目录
-    ref_subdirs = [d for d in args.ref_dir.iterdir() if d.is_dir()]
-    print(f"Found {len(ref_subdirs)} subdirectories")
-    
-    # 处理所有分子数据
-    for ref_subdir in ref_subdirs:
-        opt_subdir = args.opt_dir / ref_subdir.name
-        if not opt_subdir.exists():
-            print(f"Warning: No matching optimized directory for {ref_subdir}")
-            continue
+    # 记录找到property_changes的情况
+    with_property_changes = 0
+    without_property_changes = 0
 
-        ref_files = list(ref_subdir.glob('*.sdf'))
-        print(f"\nProcessing subdirectory {ref_subdir.name}: {len(ref_files)} reference molecules")
+    # 收集所有唯一的属性名称
+    all_property_names = set()
+
+    # 处理所有组
+    for group_idx, (ref_dir, opt_dir) in enumerate(zip(args.ref_dir, args.opt_dir)):
+        print(f"\n处理组 {group_idx+1}/{len(args.ref_dir)}: {ref_dir.name}")
         
-        for ref_file in tqdm(ref_files):
-            try:
-                try:
-                    ref_data = process_ligand(ref_file, atom_dict)
-                except Exception as e:
-                    failed_ref_process.append((str(ref_file), str(e)))
-                    print(f"Error processing reference molecule {ref_file}: {e}")
-                    continue
-
-                # 查找所有对应的优化后分子
-                opt_files = list(opt_subdir.glob(f"*.sdf"))
+        # 获取所有子目录
+        ref_subdirs = [d for d in ref_dir.iterdir() if d.is_dir()]
+        print(f"在组 {ref_dir.name} 中找到 {len(ref_subdirs)} 个子目录")
+        
+        # 处理所有分子数据
+        for ref_subdir in tqdm(ref_subdirs, desc=f"处理组 {ref_dir.name} 中的子目录"):
+            # 检查ref_subdir中的SDF文件数量，如果有两个及以上，跳过
+            ref_files = list(ref_subdir.glob('*.sdf'))
+            if len(ref_files) >= 2:
+                skipped_too_many_ref.append(f"{ref_dir.name}/{ref_subdir.name}")
+                print(f"跳过 {ref_subdir.name}: 包含 {len(ref_files)} 个SDF文件 (>= 2)")
+                continue
                 
-                if not opt_files:
-                    failed_pairs.append(str(ref_file))
-                    print(f"Warning: No optimized molecules found for {ref_file}")
-                    continue
-
-                for opt_file in opt_files:
-                    try:
-                        opt_data = process_ligand(opt_file, atom_dict)
-                    except Exception as e:
-                        failed_opt_process.append((str(opt_file), str(e)))
-                        print(f"Error processing optimized molecule {opt_file}: {e}")
-                        continue
-
-                    all_data['mol_ids'].append(f"{ref_subdir.name}/{ref_file.stem}->{opt_file.stem}")
-                    all_data['ref_lig_coords'].append(ref_data['lig_coords'])
-                    all_data['ref_lig_one_hot'].append(ref_data['lig_one_hot'])
-                    all_data['ref_lig_bond'].append(ref_data['lig_bonds'])
-                    all_data['ref_lig_mask'].append(count * np.ones(len(ref_data['lig_coords'])))
-                    all_data['opt_lig_coords'].append(opt_data['lig_coords'])
-                    all_data['opt_lig_one_hot'].append(opt_data['lig_one_hot'])
-                    all_data['opt_lig_bond'].append(opt_data['lig_bonds'])
-                    all_data['opt_lig_mask'].append(count * np.ones(len(opt_data['lig_coords'])))
-                    all_data['pocket_coords'].append(np.array([[0.0, 0.0, 0.0]]))
-                    all_data['pocket_one_hot'].append(np.eye(1, len(aa_encoder), len(aa_encoder)-1))
-                    all_data['pocket_mask'].append(count * np.ones(1))
-                    count += 1
+            opt_subdir = opt_dir / ref_subdir.name
+            if not opt_subdir.exists():
+                print(f"警告: 没有找到匹配的优化目录 {ref_subdir}")
+                continue
                 
-            except Exception as e:
-                print(f"Unexpected error processing {ref_file}: {e}")
+            # 检查opt_subdir中是否有SDF文件，如果没有，跳过
+            opt_files = list(opt_subdir.glob('*.sdf'))
+            if not opt_files:
+                skipped_no_opt.append(f"{ref_dir.name}/{ref_subdir.name}")
+                print(f"跳过 {ref_subdir.name}: 没有找到优化分子")
                 continue
 
-    print(f"\nProcessing Summary:")
-    print(f"Total subdirectories processed: {len(ref_subdirs)}")
-    print(f"Successfully processed pairs: {count}")
-    print(f"Failed to find optimized pairs: {len(failed_pairs)}")
-    print(f"Failed to process reference molecules: {len(failed_ref_process)}")
-    print(f"Failed to process optimized molecules: {len(failed_opt_process)}")
+            print(f"\n处理子目录 {ref_dir.name}/{ref_subdir.name}: {len(ref_files)} 个参考分子")
+            
+            for ref_file in ref_files:
+                try:
+                    try:
+                        ref_data = process_ligand(ref_file, atom_dict)
+                    except Exception as e:
+                        failed_ref_process.append((f"{ref_dir.name}/{ref_file}", str(e)))
+                        print(f"处理参考分子时出错 {ref_file}: {e}")
+                        continue
+
+                    ref_smiles = ref_data.get('smiles', '')
+                    
+                    for opt_file in opt_files:
+                        try:
+                            opt_data = process_ligand(opt_file, atom_dict)
+                        except Exception as e:
+                            failed_opt_process.append((f"{opt_dir.name}/{opt_file}", str(e)))
+                            print(f"处理优化分子时出错 {opt_file}: {e}")
+                            continue
+
+                        opt_smiles = opt_data.get('smiles', '')
+                        
+                        # 从优化配体中获取属性变化数据
+                        opt_property_changes = opt_data.get('property_changes', None)
+                        
+                        # 如果找到属性变化数据，解析其中包含的属性名称
+                        if opt_property_changes:
+                            with_property_changes += 1
+                            for item in opt_property_changes.split():
+                                if ':' in item:
+                                    prop, _ = item.split(':')
+                                    all_property_names.add(prop)
+                        else:
+                            without_property_changes += 1
+                            print(f"警告: 未找到属性变化数据: {opt_file}")
+
+                        # 添加组信息到分子ID中
+                        mol_id = f"{ref_dir.name}/{ref_subdir.name}/{ref_file.stem}->{opt_file.stem}"
+                        all_data['mol_ids'].append(mol_id)
+                        all_data['ref_lig_coords'].append(ref_data['lig_coords'])
+                        all_data['ref_lig_one_hot'].append(ref_data['lig_one_hot'])
+                        all_data['ref_lig_bond'].append(ref_data['lig_bonds'])
+                        all_data['ref_lig_mask'].append(count * np.ones(len(ref_data['lig_coords'])))
+                        all_data['opt_lig_coords'].append(opt_data['lig_coords'])
+                        all_data['opt_lig_one_hot'].append(opt_data['lig_one_hot'])
+                        all_data['opt_lig_bond'].append(opt_data['lig_bonds'])
+                        all_data['opt_lig_mask'].append(count * np.ones(len(opt_data['lig_coords'])))
+                        all_data['pocket_coords'].append(np.array([[0.0, 0.0, 0.0]]))
+                        all_data['pocket_one_hot'].append(np.eye(1, len(aa_encoder), len(aa_encoder)-1))
+                        all_data['pocket_mask'].append(count * np.ones(1))
+                        all_data['ref_smiles'].append(ref_smiles)
+                        all_data['opt_smiles'].append(opt_smiles)
+                        all_data['property_changes'].append(opt_property_changes)
+                        count += 1
+                    
+                except Exception as e:
+                    print(f"处理 {ref_file} 时发生意外错误: {e}")
+                    continue
+
+    print(f"\n处理摘要:")
+    print(f"处理的总组数: {len(args.ref_dir)}")
+    print(f"成功处理的分子对: {count}")
+    print(f"未找到优化对: {len(failed_pairs)}")
+    print(f"处理参考分子失败: {len(failed_ref_process)}")
+    print(f"处理优化分子失败: {len(failed_opt_process)}")
+    print(f"跳过含有过多参考分子的目录: {len(skipped_too_many_ref)}")
+    print(f"跳过没有优化分子的目录: {len(skipped_no_opt)}")
+    print(f"带有属性变化数据的分子: {with_property_changes}")
+    print(f"没有属性变化数据的分子: {without_property_changes}")
+    print(f"发现的属性种类: {len(all_property_names)}")
+    if all_property_names:
+        print(f"属性列表: {', '.join(sorted(all_property_names))}")
 
     if count == 0:
-        print("No valid molecule pairs were processed. Exiting...")
+        print("没有有效的分子对被处理。退出...")
         exit(1)
+
+    # 将收集到的属性名称转换为排序列表
+    all_properties = sorted(list(all_property_names))
 
     # 划分数据集
     try:
@@ -396,10 +515,10 @@ if __name__ == '__main__':
             'test': indices[train_count + val_count:]
         }
         
-        print(f"\nDataset split:")
-        print(f"Train set: {len(splits['train'])} samples")
-        print(f"Validation set: {len(splits['val'])} samples")
-        print(f"Test set: {len(splits['test'])} samples")
+        print(f"\n数据集划分:")
+        print(f"训练集: {len(splits['train'])} 个样本")
+        print(f"验证集: {len(splits['val'])} 个样本")
+        print(f"测试集: {len(splits['test'])} 个样本")
         
         # 保存每个数据集
         for split_name, split_indices in splits.items():
@@ -419,9 +538,20 @@ if __name__ == '__main__':
                 'pocket_coords': np.concatenate([all_data['pocket_coords'][i] for i in split_indices], axis=0),
                 'pocket_one_hot': np.concatenate([all_data['pocket_one_hot'][i] for i in split_indices], axis=0),
                 'pocket_mask': np.concatenate([all_data['pocket_mask'][i] for i in split_indices], axis=0),
+                'ref_smiles': [all_data['ref_smiles'][i] for i in split_indices],
+                'opt_smiles': [all_data['opt_smiles'][i] for i in split_indices],
+                'property_changes': [all_data['property_changes'][i] for i in split_indices],
             }
             
-            prompt_labels = np.tile([0, 0, 1], (len(split_data['opt_lig_coords']), 1))
+            # 生成prompt_labels
+            prompt_labels = []
+            for property_changes in split_data['property_changes']:
+                # 生成标签
+                label = generate_prompt_labels(property_changes, all_properties)
+                prompt_labels.append(label)
+            
+            prompt_labels = np.array(prompt_labels)
+            
             
             # 保存数据
             saveall(processed_dir / f'{split_name}.npz', 
@@ -441,19 +571,35 @@ if __name__ == '__main__':
                 
         # 保存失败记录
         with open(processed_dir / 'processing_failures.txt', 'w') as f:
-            f.write("Missing optimized pairs:\n")
+            f.write("处理的组目录:\n")
+            for i, (ref_dir, opt_dir) in enumerate(zip(args.ref_dir, args.opt_dir)):
+                f.write(f"组 {i+1}: {ref_dir} -> {opt_dir}\n")
+            
+            f.write("\n未找到优化对:\n")
             for pair in failed_pairs:
                 f.write(f"{pair}\n")
-            f.write("\nFailed reference molecules:\n")
+            f.write("\n处理参考分子失败:\n")
             for mol, error in failed_ref_process:
                 f.write(f"{mol}: {error}\n")
-            f.write("\nFailed optimized molecules:\n")
+            f.write("\n处理优化分子失败:\n")
             for mol, error in failed_opt_process:
                 f.write(f"{mol}: {error}\n")
+            f.write("\n跳过含有过多参考分子的目录:\n")
+            for dir_path in skipped_too_many_ref:
+                f.write(f"{dir_path}\n")
+            f.write("\n跳过没有优化分子的目录:\n")
+            for dir_path in skipped_no_opt:
+                f.write(f"{dir_path}\n")
+            f.write("\n属性变化数据统计:\n")
+            f.write(f"带有属性变化数据的分子: {with_property_changes}\n")
+            f.write(f"没有属性变化数据的分子: {without_property_changes}\n")
+            if all_properties:
+                f.write(f"发现的属性种类: {len(all_properties)}\n")
+                f.write(f"属性列表: {', '.join(all_properties)}\n")
                 
-        print(f"\nProcessed data saved to {processed_dir}")
-        print(f"Processing failures logged to {processed_dir}/processing_failures.txt")
+        print(f"\n处理数据已保存到 {processed_dir}")
+        print(f"处理失败记录已保存到 {processed_dir}/processing_failures.txt")
         
     except Exception as e:
-        print(f"Error saving processed data: {e}")
+        print(f"保存处理数据时出错: {e}")
         exit(1)

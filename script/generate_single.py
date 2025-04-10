@@ -105,7 +105,7 @@ atom_nf = len(lig_type_decoder)
 aa_nf = len(pocket_type_decoder)
 
 x_dims = 3
-joint_nf =64
+joint_nf =128
 
 net_dynamics = EGNNDynamics(
     atom_nf = atom_nf,
@@ -113,7 +113,7 @@ net_dynamics = EGNNDynamics(
     n_dims = x_dims,
     joint_nf = joint_nf,
     device='cuda',
-    hidden_nf= 128,
+    hidden_nf= 256,
     act_fn=torch.nn.SiLU(),
     n_layers= 5,
     attention= True,
@@ -146,7 +146,7 @@ cddpm = ConditionalDDPM(
             virtual_node_idx=lig_type_encoder[symbol] if virtual_nodes else None
     )
 
-atom_mapping = {0:'H', 1:'C', 2:'N', 3:'O', 4:'F', 5:'P', 6:'S', 7:'CL', 8:'BR', 9:'I', 10: 'UNK'}
+atom_mapping = {0: 'C', 1: 'N', 2: 'O', 3: 'S', 4: 'B', 5: 'Br', 6: 'Cl', 7: 'P', 8: 'I', 9: 'F', 10: 'others'}
 
 def prepare_data_from_pdb(pdb_file_ligand, pdb_file_pocket, atom_mapping, device='cuda'):
     # 解析配体的 PDB 文件
@@ -269,6 +269,8 @@ def write_pdb(generated_sdf, output_dir, batch_idx, atom_mapping):
 # 调用例子
 pdb_file_ligand = '/data/home/zhangzhiyong/lead_optimization/SDE/sample/7sna_cut10_ligand.pdb'
 pdb_file_pocket = '/data/home/zhangzhiyong/lead_optimization/SDE/sample/7sna_cut10_pocket.pdb'
+# pdb_file_ligand = '/data/home/zhangzhiyong/lead_optimization/SDE/sample/6epj_cut15_ligand.pdb'
+# pdb_file_pocket = '/data/home/zhangzhiyong/lead_optimization/SDE/sample/6epj_cut15_pocket.pdb'
 # pdb_file_ligand = '/data/home/zhangzhiyong/lead_optimization/PromptDiffModel/data/docking_results/group_1/1b9t_A_rec_1vcj_iba_lig_tt_docked/1b9t_A_rec_1vcj_iba_lig_tt_docked_0_pocket10.pdb'
 # pdb_file_pocket = '/data/home/zhangzhiyong/lead_optimization/PromptDiffModel/data/docking_results/group_1/1b9t_A_rec_1vcj_iba_lig_tt_docked/1b9t_A_rec_1vcj_iba_lig_tt_docked_generated_1_docked_poses.pdb'
 ref_ligand, pocket = prepare_data_from_pdb(pdb_file_ligand, pdb_file_pocket, atom_mapping, device='cuda')
@@ -290,15 +292,15 @@ pocket_com_before = scatter_mean(pocket['x'], pocket['mask'], dim=0)
 print(pocket['one_hot'].size())
 print(pocket['x'].size())
 
-prompt_labels = torch.tensor([[0,0,1]]).repeat(28, 1).to('cuda')
+prompt_labels = torch.tensor([[0,0,1]]).repeat(29, 1).to('cuda')
 # pocket['mask'] = torch.tensor([0],device = device)
 # pocket['x'] = torch.tensor([[0.0,0.0,0.0]],device = device)
 # pocket['one_hot'] = torch.tensor([[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0]],device = device)
-
+# pocket['size'] = pocket['size'].unsqueeze(0)
 
 device = 'cuda'
-#checkpoint = torch.load('../checkpoints/zinc/cddpm_epoch_45.pth')
-checkpoint = torch.load('../checkpoints/zinc/cddpm_ligand_only_epoch_100.pth')
+checkpoint = torch.load('../checkpoints/zinc/cddpm_ligand_only_epoch_82.pth')
+#checkpoint = torch.load('../checkpoints/zinc/zinc_epoch_50.pth')
 #checkpoint = torch.load('../checkpoints/chembl/chembl_epoch_5.pth')
 #checkpoint = torch.load('../checkpoints/cddpm/cddpm_epoch_250.pth')
 
@@ -310,7 +312,7 @@ with torch.no_grad():
     
     cddpm.to(device)
 
-    xh_lig, xh_pocket, lig_mask, pocket_mask = cddpm.sample_given_pocket(pocket, prompt_labels, num_nodes_lig = 28, return_frames=1,
+    xh_lig, xh_pocket, lig_mask, pocket_mask = cddpm.sample_given_pocket(pocket, prompt_labels, num_nodes_lig = 29, return_frames=1,
                             timesteps=1000)
 
     

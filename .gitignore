@@ -5,3 +5,4 @@ processed_crossdock_noH_full_temp/train.npz
 ZINC/
 ChEMBL/
 checkpoints/
+ZINC_DiffLinker/

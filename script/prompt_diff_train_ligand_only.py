@@ -18,7 +18,7 @@ import math
 import torch.nn.functional as F
 
 datadir = '../data/ligand_only'
-
+# datadir = '../data/optimized_ligand/sdf_files_fg'
 def get_prompts(data):
     # 创建一个张量 [0, 0, 1]
     prompts = torch.tensor(data['prompt_labels']).to('cuda', INT_TYPE)
@@ -196,7 +196,7 @@ test_loader = DataLoader(test_dataset, batch_size=48, num_workers=24, collate_fn
 
 
 x_dims = 3
-joint_nf = 64
+joint_nf = 128
 
 
 net_dynamics = EGNNDynamics(
@@ -205,7 +205,7 @@ net_dynamics = EGNNDynamics(
     n_dims = x_dims,
     joint_nf = joint_nf,
     device='cuda',
-    hidden_nf= 128,
+    hidden_nf= 256,
     act_fn=torch.nn.SiLU(),
     n_layers= 5,
     attention= True,
@@ -258,8 +258,8 @@ if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
 # 添加恢复训练参数
-resume_epoch = 16  # 设为None表示从头开始，设为具体数字恢复指定epoch
-resume_checkpoint_path = os.path.join(save_dir, f'zinc_epoch_{resume_epoch}.pth') if resume_epoch is not None else None
+resume_epoch = 11  # 设为None表示从头开始，设为具体数字恢复指定epoch
+resume_checkpoint_path = os.path.join(save_dir, f'cddpm_ligand_only_epoch_{resume_epoch}.pth') if resume_epoch is not None else None
 # 加载检查点（如果存在）
 start_epoch = 0
 if resume_epoch is not None and os.path.exists(resume_checkpoint_path):

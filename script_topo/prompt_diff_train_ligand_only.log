@@ -1,0 +1,4 @@
+nohup: ignoring input
+Entropy of n_nodes: H[N] 5.823984622955322
+Loaded checkpoint from epoch 18, resuming from epoch 19
+Epoch 0:   0%|          | 0/1775 [00:00<?, ?it/s]
